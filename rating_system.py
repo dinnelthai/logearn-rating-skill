@@ -57,6 +57,17 @@ class TokenSignal:
     liquidity_locked: bool = False      # 流动性是否锁定
     lock_duration: int = 0              # 锁定天数
 
+    # LogEarn持仓结构数据（tag_users_holding_percent）
+    smart_volume: float = 0.0           # 聪明钱地址持仓占比
+    whale_volume: float = 0.0           # 巨鲸地址持仓占比
+    new_volume: float = 0.0             # 新地址持仓占比
+    old_volume: float = 0.0             # 老地址持仓占比
+    frequent_volume: float = 0.0        # 高频交易地址持仓占比
+    amm_volume: float = 0.0             # AMM做市商地址持仓占比
+    exchange_volume: float = 0.0        # 交易所地址持仓占比
+    scam_volume: float = 0.0            # 诈骗地址持仓占比
+    shit_volume: float = 0.0            # 垃圾地址持仓占比
+
 
 class RatingSystem:
     """独立评分系统"""
@@ -384,7 +395,114 @@ class RatingSystem:
         
         return round(score, 1)
     
-    # ========== 维度6: 流动性 (5%) ==========
+    # ========== 维度6: 持仓结构 (15%) ==========
+    
+    def check_new_volume(self, ratio: float) -> float:
+        """新地址持仓占比检测
+        
+        新钱包持仓占比越高，断头盘风险越大
+        """
+        if ratio < 0.30:      # <30% 健康
+            return 100
+        elif ratio < 0.40:    # 30-40% 正常
+            return 85
+        elif ratio < 0.50:    # 40-50% 一般
+            return 70
+        elif ratio < 0.60:    # 50-60% 可疑
+            return 50
+        else:                 # >60% 断头盘风险
+            return 20
+    
+    def check_shit_volume(self, ratio: float) -> float:
+        """垃圾地址持仓占比检测
+        
+        垃圾钱包>4%则断头盘概率很大
+        """
+        if ratio < 0.02:      # <2% 非常干净
+            return 100
+        elif ratio < 0.04:    # 2-4% 可接受
+            return 85
+        elif ratio < 0.06:    # 4-6% 高风险
+            return 50
+        elif ratio < 0.10:    # 6-10% 严重风险
+            return 30
+        else:                 # >10% 极高风险
+            return 10
+    
+    def check_scam_volume(self, ratio: float) -> float:
+        """诈骗地址持仓占比检测"""
+        if ratio < 0.01:      # <1% 安全
+            return 100
+        elif ratio < 0.03:    # 1-3% 警惕
+            return 70
+        elif ratio < 0.05:    # 3-5% 高风险
+            return 40
+        else:                 # >5% 极高风险
+            return 10
+    
+    def check_smart_whale_volume(self, smart: float, whale: float) -> float:
+        """聪明钱+巨鲸持仓占比检测
+        
+        聪明钱和巨鲸持仓越高，说明专业投资者认可
+        """
+        total = smart + whale
+        
+        if total > 0.30:      # >30% 顶级
+            return 100
+        elif total > 0.20:    # 20-30% 优秀
+            return 90
+        elif total > 0.10:    # 10-20% 良好
+            return 75
+        elif total > 0.05:    # 5-10% 一般
+            return 60
+        else:                 # <5% 较差
+            return 40
+    
+    def check_old_volume(self, ratio: float) -> float:
+        """老地址持仓占比检测
+        
+        老地址持仓高说明有坚定持有者
+        """
+        if ratio > 0.40:      # >40% 优秀
+            return 100
+        elif ratio > 0.30:    # 30-40% 良好
+            return 85
+        elif ratio > 0.20:    # 20-30% 一般
+            return 70
+        elif ratio > 0.10:    # 10-20% 较差
+            return 55
+        else:                 # <10% 很差
+            return 40
+    
+    def holding_structure_score(self, signal: TokenSignal) -> float:
+        """持仓结构评分
+        
+        权重分配：
+        - 新地址占比 30% (断头盘风险)
+        - 垃圾地址占比 25% (刷量风险)
+        - 诈骗地址占比 20% (安全风险)
+        - 聪明钱+巨鲸 15% (专业认可)
+        - 老地址占比 10% (持有信心)
+        """
+        new_score = self.check_new_volume(signal.new_volume)
+        shit_score = self.check_shit_volume(signal.shit_volume)
+        scam_score = self.check_scam_volume(signal.scam_volume)
+        smart_whale_score = self.check_smart_whale_volume(
+            signal.smart_volume, signal.whale_volume
+        )
+        old_score = self.check_old_volume(signal.old_volume)
+        
+        score = (
+            new_score * 0.30 +
+            shit_score * 0.25 +
+            scam_score * 0.20 +
+            smart_whale_score * 0.15 +
+            old_score * 0.10
+        )
+        
+        return round(score, 1)
+    
+    # ========== 维度7: 流动性 (5%) ==========
     
     def liquidity_score(self, signal: TokenSignal) -> float:
         """流动性评分"""
@@ -407,22 +525,24 @@ class RatingSystem:
     # ========== 最终评分 ==========
 
     def calculate_rating(self, signal: TokenSignal) -> Dict:
-        """计算最终评分（5维度）
+        """计算最终评分（6维度）
 
-        权重：叙事25% + 安全性30% + 聪明钱20% + 推广15% + 流动性10%
+        权重：叙事20% + 安全性25% + 聪明钱15% + 推广10% + 持仓结构15% + 流动性15%
         """
         narrative    = self.narrative_score(signal)
         safety       = self.safety_score(signal)
         smart_money  = self.smart_money_score(signal)
         promotion    = self.promotion_score(signal)
+        holding      = self.holding_structure_score(signal)
         liquidity    = self.liquidity_score(signal)
 
         final_score = (
-            narrative    * 0.25 +
-            safety       * 0.30 +
-            smart_money  * 0.20 +
-            promotion    * 0.15 +
-            liquidity    * 0.10
+            narrative    * 0.20 +
+            safety       * 0.25 +
+            smart_money  * 0.15 +
+            promotion    * 0.10 +
+            holding      * 0.15 +
+            liquidity    * 0.15
         )
 
         return {
@@ -432,6 +552,7 @@ class RatingSystem:
                 "safety":      round(safety, 1),
                 "smart_money": round(smart_money, 1),
                 "promotion":   round(promotion, 1),
+                "holding_structure": round(holding, 1),
                 "liquidity":   round(liquidity, 1),
             },
             "grade": self._get_grade(final_score),
@@ -695,7 +816,14 @@ def test_rating_system():
         has_website=True,
         has_whitepaper=True,
         liquidity_locked=True,
-        lock_duration=180
+        lock_duration=180,
+        # 持仓结构数据
+        smart_volume=0.15,
+        whale_volume=0.12,
+        new_volume=0.25,
+        old_volume=0.35,
+        shit_volume=0.02,
+        scam_volume=0.01
     )
     
     result1 = rating_system.calculate_rating(signal1)
@@ -722,7 +850,14 @@ def test_rating_system():
         pool_liquidity=30000,
         mcap=250000,
         twitter_followers=1200,
-        has_website=True
+        has_website=True,
+        # 持仓结构数据
+        smart_volume=0.08,
+        whale_volume=0.10,
+        new_volume=0.40,
+        old_volume=0.28,
+        shit_volume=0.03,
+        scam_volume=0.02
     )
     
     result2 = rating_system.calculate_rating(signal2)
@@ -748,7 +883,14 @@ def test_rating_system():
         smart_money_ratio=0.01,
         pool_liquidity=5000,
         mcap=100000,
-        twitter_followers=200
+        twitter_followers=200,
+        # 持仓结构数据（断头盘特征）
+        smart_volume=0.02,
+        whale_volume=0.03,
+        new_volume=0.65,
+        old_volume=0.08,
+        shit_volume=0.08,
+        scam_volume=0.04
     )
     
     result3 = rating_system.calculate_rating(signal3)
