@@ -9,6 +9,10 @@ from dataclasses import dataclass
 from typing import Optional, Dict
 
 
+def clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, v))
+
+
 @dataclass
 class TokenSignal:
     """Token信号数据"""
@@ -16,29 +20,37 @@ class TokenSignal:
     symbol: str
     token_name: str
     description: str = ""
-    
+
+    # 叙事子维度（meme-rating-system 方案）
+    narrative_credibility: float = 0.0   # 0~1
+    narrative_kol_approval: float = 0.0  # 0~1
+    narrative_community: float = 0.0      # 0~1
+    narrative_purity: float = 0.0         # 0~1
+    narrative_sentiment: float = 0.5      # 0~1
+
     # 真实性数据
     new_wallet_ratio: float = 0.0       # 新钱包占比
     shit_wallet_ratio: float = 0.0      # 垃圾钱包占比
     buyer_count: int = 0                # 交易地址数
-    
+
     # 聪明钱数据
     smart_money_ratio: float = 0.0      # 聪明钱占比
-    
+
     # 流动性数据
     pool_liquidity: float = 0.0         # 流动性
     mcap: float = 0.0                   # 市值
-    
+
     # 推广数据（可选）
     has_dexscreener_ads: bool = False   # 是否有DexScreener推广
-    dex_ad_position: str = ""           # 推广位置: trending/promoted
-    dex_ad_duration: int = 0            # 推广天数
-    twitter_followers: int = 0          # Twitter粉丝
+    dex_ad_position: str = ""            # 推广位置: trending/promoted
+    dex_ad_duration: int = 0             # 推广天数
+    dex_boost_amount: float = 0.0        # DexScreener Boost 总预算（U）
+    twitter_followers: int = 0           # Twitter粉丝
     telegram_members: int = 0           # Telegram成员
     has_kol_promotion: bool = False     # 是否有KOL推广
     has_website: bool = False           # 是否有官网
     has_whitepaper: bool = False        # 是否有白皮书
-    
+
     # 安全性数据（可选）
     dev_sold_ratio: float = 0.0         # 开发者卖出比例
     has_rug_history: bool = False       # 是否有Rug历史
@@ -95,31 +107,62 @@ class RatingSystem:
         pass
     
     # ========== 维度1: 叙事热度 (25%) ==========
-    
+    # 采用 meme-rating-system 方案：子维度加权 + 关键词 Tier
+
+    WEIGHTS_NARRATIVE = {
+        "credibility": 0.30,
+        "kol_approval": 0.20,
+        "community": 0.20,
+        "purity": 0.15,
+        "sentiment": 0.15
+    }
+
     def narrative_score(self, signal: TokenSignal) -> float:
-        """叙事热度评分"""
+        """叙事热度评分（meme-rating-system 方案）
+
+        70% 子维度加权 + 30% 关键词 Tier
+        """
+        # 子维度加权
+        fields = {
+            "credibility":  signal.narrative_credibility,
+            "kol_approval": signal.narrative_kol_approval,
+            "community":    signal.narrative_community,
+            "purity":       signal.narrative_purity,
+            "sentiment":    signal.narrative_sentiment,
+        }
+        base = sum(self.WEIGHTS_NARRATIVE[k] * fields[k] for k in self.WEIGHTS_NARRATIVE)
+
+        # 关键词 Tier（30% 权重）
         text = f"{signal.symbol} {signal.token_name} {signal.description}".lower()
-        
-        # 检查超级热点
+        keyword_score = 0.0
+
         for narrative, config in self.SUPER_HOT_NARRATIVES.items():
             for keyword in config["keywords"]:
                 if keyword in text:
-                    return config["score"]
-        
-        # 检查主流热点
-        for narrative, config in self.MAINSTREAM_NARRATIVES.items():
-            for keyword in config["keywords"]:
-                if keyword in text:
-                    return config["score"]
-        
-        # 检查普通叙事
-        for narrative, config in self.NORMAL_NARRATIVES.items():
-            for keyword in config["keywords"]:
-                if keyword in text:
-                    return config["score"]
-        
+                    keyword_score = max(keyword_score, config["score"] / 100)
+                    break
+
+        if keyword_score == 0:
+            for narrative, config in self.MAINSTREAM_NARRATIVES.items():
+                for keyword in config["keywords"]:
+                    if keyword in text:
+                        keyword_score = max(keyword_score, config["score"] / 100)
+                        break
+
+        if keyword_score == 0:
+            for narrative, config in self.NORMAL_NARRATIVES.items():
+                for keyword in config["keywords"]:
+                    if keyword in text:
+                        keyword_score = max(keyword_score, config["score"] / 100)
+                        break
+
         # 无叙事
-        return 30.0
+        if keyword_score == 0:
+            return round(base * 100, 1)
+
+        # Blend: 70% 子维度，30% 关键词
+        total = base * 0.7 + keyword_score * 0.3
+        return round(clamp(total, 0, 1) * 100, 1)
     
     # ========== 维度2: 真实性 (25%) ==========
     
@@ -248,24 +291,45 @@ class RatingSystem:
     # ========== 维度5: 推广投入 (10%) ==========
     
     def check_dexscreener_ads(self, signal: TokenSignal) -> float:
-        """DexScreener推广检测"""
+        """DexScreener推广检测
+
+        Boost 金额来源：GET /token-boosts/top/v1 -> totalAmount（U）
+        - totalAmount >= 1000U  → 100分
+        - totalAmount >= 500U   → 85分
+        - totalAmount >= 100U   → 70分
+        - totalAmount > 0U      → 55分
+        - 无 Boost              → 40分（无推广基准）
+        """
+        boost = signal.dex_boost_amount
+
+        # Boost 金额直接决定分数（独立判断）
+        if boost >= 1000:
+            return 100.0
+        elif boost >= 500:
+            return 85.0
+        elif boost >= 100:
+            return 70.0
+        elif boost > 0:
+            return 55.0
+
+        # 无 Boost，看是否有广告位
         if not signal.has_dexscreener_ads:
-            return 40
-        
+            return 40.0
+
         score = 60
-        
+
         # 推广位置加分
         if signal.dex_ad_position == "promoted":
             score += 30
         elif signal.dex_ad_position == "trending":
             score += 20
-        
+
         # 持续时间加分
         if signal.dex_ad_duration >= 7:
             score += 10
         elif signal.dex_ad_duration >= 3:
             score += 5
-        
+
         return min(score, 100)
     
     def check_social_promotion(self, signal: TokenSignal) -> float:
@@ -341,37 +405,34 @@ class RatingSystem:
             return 30
     
     # ========== 最终评分 ==========
-    
+
     def calculate_rating(self, signal: TokenSignal) -> Dict:
-        """计算最终评分"""
-        
-        # 各维度评分
-        narrative = self.narrative_score(signal)
-        authenticity = self.authenticity_score(signal)
-        safety = self.safety_score(signal)
-        smart_money = self.smart_money_score(signal)
-        promotion = self.promotion_score(signal)
-        liquidity = self.liquidity_score(signal)
-        
-        # 加权求和
+        """计算最终评分（5维度）
+
+        权重：叙事25% + 安全性30% + 聪明钱20% + 推广15% + 流动性10%
+        """
+        narrative    = self.narrative_score(signal)
+        safety       = self.safety_score(signal)
+        smart_money  = self.smart_money_score(signal)
+        promotion    = self.promotion_score(signal)
+        liquidity    = self.liquidity_score(signal)
+
         final_score = (
-            narrative * 0.25 +
-            authenticity * 0.25 +
-            safety * 0.20 +
-            smart_money * 0.15 +
-            promotion * 0.10 +
-            liquidity * 0.05
+            narrative    * 0.25 +
+            safety       * 0.30 +
+            smart_money  * 0.20 +
+            promotion    * 0.15 +
+            liquidity    * 0.10
         )
-        
+
         return {
             "rating": round(final_score, 1),
             "breakdown": {
-                "narrative": round(narrative, 1),
-                "authenticity": round(authenticity, 1),
-                "safety": round(safety, 1),
+                "narrative":   round(narrative, 1),
+                "safety":      round(safety, 1),
                 "smart_money": round(smart_money, 1),
-                "promotion": round(promotion, 1),
-                "liquidity": round(liquidity, 1)
+                "promotion":   round(promotion, 1),
+                "liquidity":   round(liquidity, 1),
             },
             "grade": self._get_grade(final_score),
             "recommendation": self._get_recommendation(final_score)
@@ -400,6 +461,207 @@ class RatingSystem:
             return "⚠️ 观察"
         else:
             return "❌ 不建议买入"
+
+
+# ========== 筹码分析（基于GMGN API）============
+
+class ChipAnalysis:
+    """GMGN筹码结构分析"""
+
+    def __init__(self):
+        pass
+
+    def analyze(self, ca: str, chain: str = 'sol') -> dict:
+        """从GMGN API拉取筹码结构数据并分析"""
+        from gmgn_api import GMGNAPI
+        gmgn = GMGNAPI()
+        info = gmgn.get_full_token_analysis(ca, chain=chain)
+
+        i = info.get('info', {})
+        s = info.get('security', {})
+        stat = i.get('stat', {})
+        wts = i.get('wallet_tags_stat', {})
+        lock_summary = s.get('lock_summary', {})
+        holders = info.get('holders', [])
+        smart_holders = info.get('smart_holders', [])
+
+        holder_count = i.get('holder_count', 0) or 0
+        top10_rate = float(stat.get('top_10_holder_rate', 0) or 0)  # 0~1
+        burn_ratio = float(s.get('burn_ratio', 0) or 0)              # 0~1
+        dev_hold = float(stat.get('dev_team_hold_rate', 0) or 0)    # 0~1
+        creator_hold = float(stat.get('creator_hold_rate', 0) or 0)  # 0~1
+        bot_degen_rate = float(stat.get('bot_degen_rate', 0) or 0)  # 0~1
+        fresh_wallet_rate = float(stat.get('fresh_wallet_rate', 0) or 0)  # 0~1
+
+        smart_count = wts.get('smart_wallets', 0) or 0
+        smart_rate = smart_count / holder_count if holder_count else 0
+
+        sniper_count = wts.get('sniper_wallets', 0) or 0
+
+        lock_info = lock_summary.get('lock_detail', [])
+        lock_percent = sum(float(l.get('percent', 0)) for l in lock_info) if lock_info else 0
+        is_locked = lock_summary.get('is_locked', False)
+
+        # 计算TopHolder大车头（单个最大持仓占比）
+        top1_rate = 0.0
+        top3_rate = 0.0
+        top5_rate = 0.0
+        if holders:
+            sorted_holders = sorted(holders, key=lambda h: float(h.get('amount_percentage', 0) or 0), reverse=True)
+            if len(sorted_holders) >= 1:
+                top1_rate = float(sorted_holders[0].get('amount_percentage', 0) or 0)
+            if len(sorted_holders) >= 3:
+                top3_rate = sum(float(h.get('amount_percentage', 0) or 0) for h in sorted_holders[:3])
+            if len(sorted_holders) >= 5:
+                top5_rate = sum(float(h.get('amount_percentage', 0) or 0) for h in sorted_holders[:5])
+
+        # 计算聪明钱平均持仓（仅当前仍持有的）
+        smart_avg_hold = 0.0
+        active_smart = [h for h in smart_holders if h.get('balance', 0) and float(h.get('balance', 0)) > 0]
+        if active_smart:
+            smart_avg_hold = sum(float(h.get('amount_percentage', 0) or 0) for h in active_smart) / len(active_smart)
+
+        # 计算套牢比例（有成本且当前亏损的holder）
+        locked_holders = 0
+        for h in holders:
+            cost = float(h.get('cost', 0) or 0)
+            profit_change = float(h.get('profit_change', 0) or 0)
+            if cost > 0 and profit_change < 0:
+                locked_holders += 1
+        locked_rate = locked_holders / len(holders) if holders else 0
+
+        return {
+            'holder_count': holder_count,
+            'top10_rate': top10_rate,
+            'top1_rate': top1_rate,
+            'top3_rate': top3_rate,
+            'top5_rate': top5_rate,
+            'burn_ratio': burn_ratio,
+            'dev_hold': dev_hold,
+            'creator_hold': creator_hold,
+            'smart_count': smart_count,
+            'smart_rate': smart_rate,
+            'smart_avg_hold': smart_avg_hold,
+            'sniper_count': sniper_count,
+            'bot_degen_rate': bot_degen_rate,
+            'fresh_wallet_rate': fresh_wallet_rate,
+            'locked_rate': locked_rate,
+            'is_locked': is_locked,
+            'lock_percent': lock_percent,
+            'holders': holders,
+            'smart_holders': smart_holders,
+        }
+
+    def score_top_concentration(self, rate: float) -> float:
+        """Top集中度评分"""
+        if rate < 0.20:
+            return 100
+        elif rate < 0.30:
+            return 90
+        elif rate < 0.40:
+            return 75
+        elif rate < 0.50:
+            return 60
+        elif rate < 0.60:
+            return 40
+        else:
+            return 20
+
+    def score_burn_ratio(self, rate: float) -> float:
+        """烧毁比例评分"""
+        if rate >= 0.90:
+            return 100
+        elif rate >= 0.70:
+            return 90
+        elif rate >= 0.50:
+            return 75
+        elif rate >= 0.30:
+            return 60
+        else:
+            return 30
+
+    def score_smart_money(self, rate: float) -> float:
+        """聪明钱占比评分"""
+        if rate > 0.10:
+            return 100
+        elif rate > 0.05:
+            return 85
+        elif rate > 0.02:
+            return 70
+        elif rate > 0.01:
+            return 55
+        else:
+            return 40
+
+    def score_bot_degen(self, rate: float) -> float:
+        """机器人/degen占比评分（越低越好）"""
+        if rate < 0.10:
+            return 100
+        elif rate < 0.20:
+            return 85
+        elif rate < 0.30:
+            return 70
+        elif rate < 0.40:
+            return 55
+        else:
+            return 30
+
+    def score_locked(self, is_locked: bool, lock_percent: float) -> float:
+        """锁仓评分"""
+        if not is_locked:
+            return 40
+        if lock_percent >= 0.90:
+            return 100
+        elif lock_percent >= 0.70:
+            return 90
+        elif lock_percent >= 0.50:
+            return 75
+        elif lock_percent >= 0.30:
+            return 60
+        else:
+            return 50
+
+    def score_fresh_wallet(self, rate: float) -> float:
+        """新钱包占比评分（越低越好，刷量风险低）"""
+        if rate < 0.10:
+            return 100
+        elif rate < 0.20:
+            return 85
+        elif rate < 0.30:
+            return 70
+        elif rate < 0.40:
+            return 55
+        else:
+            return 30
+
+    def calculate_chip_score(self, chip: dict) -> dict:
+        """计算筹码综合评分
+
+        权重：Top10集中度30% + 烧毁比例25% + 聪明钱占比20% +
+              机器人占比15% + 锁仓10%
+        """
+        top_s = self.score_top_concentration(chip['top10_rate'])
+        burn_s = self.score_burn_ratio(chip['burn_ratio'])
+        smart_s = self.score_smart_money(chip['smart_rate'])
+        bot_s = self.score_bot_degen(chip['bot_degen_rate'])
+        lock_s = self.score_locked(chip['is_locked'], chip['lock_percent'])
+
+        composite = (
+            top_s  * 0.30 +
+            burn_s * 0.25 +
+            smart_s * 0.20 +
+            bot_s  * 0.15 +
+            lock_s * 0.10
+        )
+
+        return {
+            'chip_score': round(composite, 1),
+            'top_concentration': top_s,
+            'burn_ratio_score': burn_s,
+            'smart_money': smart_s,
+            'bot_degen': bot_s,
+            'locked': lock_s,
+        }
 
 
 # ========== 测试示例 ==========
