@@ -1,0 +1,4 @@
+# LogEarn Rating Skill - 依赖
+
+# 核心依赖
+# 无外部依赖，仅使用Python标准库
